@@ -1,202 +1,191 @@
-Find-RDPaccess
+# Find-DomainRemoteAccess
 
 A PowerShell tool for enumerating local group memberships on Active Directory computers using PowerView. It identifies potential local administrator, Remote Desktop Protocol (RDP), and Windows Remote Management (WinRM) access for the current user.
 
-The script also supports optional RDP port reachability and WinRM remote command execution tests.
+## Features
 
-Features
+- Enumerates local group memberships on Active Directory computers.
+- Checks `Administrators`, `Remote Desktop Users`, and `Remote Management Users`.
+- Displays `Local Group Name` and `MemberName`.
+- Matches the current user SID and group SIDs in the current Windows token.
+- Checks the domain's `Domain Users` SID.
+- Displays only computers with matching group memberships.
+- Optionally tests RDP port 3389 reachability.
+- Optionally tests WinRM remote command execution.
+- Supports computer name, search base, server, and workstation filters.
 
-* Enumerates local group memberships on Active Directory computers.
-* Checks the following local groups:
-    * Administrators
-    * Remote Desktop Users
-    * Remote Management Users
-* Displays Local Group Name and MemberName for matching entries.
-* Matches the current user SID and group SIDs in the current Windows token.
-* Checks the domain’s Domain Users SID.
-* Displays only computers with at least one matching group membership.
-* Optionally tests TCP port 3389 reachability for RDP.
-* Optionally tests WinRM remote command execution.
-* Supports filtering by computer name, AD search base, servers, and workstations.
-* Processes computers sequentially and displays results after the requested checks finish.
+## Requirements
 
-Repository Structure
+- Windows PowerShell.
+- Active Directory PowerShell module.
+- PowerView loaded into the current PowerShell session.
+- Appropriate permissions and network connectivity for remote enumeration.
+- WinRM configured and accessible for WinRM testing.
 
-Find-RDPaccess/
-├── README.md
-└── Find-RDPaccess.ps1
+## Installation
 
-Requirements
+### 1. Clone the Repository
 
-* Windows PowerShell.
-* An Active Directory environment.
-* The ActiveDirectory PowerShell module.
-* PowerView loaded into the current PowerShell session.
-* Appropriate permissions and network connectivity for remote enumeration.
-* For WinRM testing, a working WinRM configuration and sufficient permissions to execute remote commands.
+```powershell
+git clone <REPO-URL>
+cd Find-DomainRemoteAccess
+```
 
-Installation
+### 2. Import the Required Modules
 
-1. Clone the Repository
+Import the Active Directory module:
 
-git clone <YOUR-REPOSITORY-URL>
-cd Find-RDPaccess
-
-Alternatively, download Find-RDPaccess.ps1 directly from the repository.
-
-2. Import the Required Modules
-
-Import the ActiveDirectory module:
-
+```powershell
 Import-Module ActiveDirectory
+```
 
-Import PowerView from your local path:
+Import PowerView:
 
+```powershell
 . .\PowerView.ps1
+```
 
-Replace .\PowerView.ps1 with the actual path to your PowerView script.
+Replace `.\PowerView.ps1` with the actual path to your PowerView script.
 
-3. Run the Script
+### 3. Run the Script
 
-.\Find-RDPaccess.ps1
+```powershell
+.\Find-DomainRemoteAccess.ps1
+```
 
-Usage
+## Usage
 
-1. Basic Enumeration
+### Basic Enumeration
 
-Enumerate domain computers and identify matching local group memberships.
+```powershell
+.\Find-DomainRemoteAccess.ps1
+```
 
-.\Find-RDPaccess.ps1
+### Test RDP and WinRM Connectivity
 
-Connection tests are not performed unless -TestConnection is specified.
+```powershell
+.\Find-DomainRemoteAccess.ps1 -TestConnection
+```
 
-2. Test RDP and WinRM Connectivity
+### Enumerate a Specific Computer
 
-.\Find-RDPaccess.ps1 -TestConnection
+```powershell
+.\Find-DomainRemoteAccess.ps1 -ComputerName ACADEMY-EA-MS01
+```
 
-This runs the following checks on computers with matching group memberships:
+### Enumerate a Specific Computer and Test Connectivity
 
-Test	Method	Purpose
-RDP Connection	TCP port 3389 check	Determines whether the RDP port is reachable
-WinRM Connection	Remote PowerShell command	Determines whether remote command execution succeeds
+```powershell
+.\Find-DomainRemoteAccess.ps1 -ComputerName ACADEMY-EA-MS01 -TestConnection
+```
 
-Note: The RDP test checks port reachability only. It does not attempt authentication or establish an interactive RDP session.
+### Enumerate Multiple Computers
 
-3. Enumerate a Specific Computer
+```powershell
+.\Find-DomainRemoteAccess.ps1 -ComputerName ACADEMY-EA-MS01,ACADEMY-EA-DC01
+```
 
-.\Find-RDPaccess.ps1 -ComputerName ACADEMY-EA-MS01
+### Enumerate Servers Only
 
-4. Enumerate a Specific Computer and Test Connectivity
+```powershell
+.\Find-DomainRemoteAccess.ps1 -ServersOnly
+```
 
-.\Find-RDPaccess.ps1 -ComputerName ACADEMY-EA-MS01 -TestConnection
+### Enumerate Workstations Only
 
-5. Enumerate Multiple Computers
+```powershell
+.\Find-DomainRemoteAccess.ps1 -WorkstationsOnly
+```
 
-.\Find-RDPaccess.ps1 -ComputerName ACADEMY-EA-MS01,ACADEMY-EA-DC01
+### Specify an Active Directory Search Base
 
-6. Enumerate Servers Only
+```powershell
+.\Find-DomainRemoteAccess.ps1 -SearchBase "OU=Workstations,DC=INLANEFREIGHT,DC=LOCAL"
+```
 
-.\Find-RDPaccess.ps1 -ServersOnly
+### Combine Parameters
 
-7. Enumerate Workstations Only
+```powershell
+.\Find-DomainRemoteAccess.ps1 -WorkstationsOnly -TestConnection
+```
 
-.\Find-RDPaccess.ps1 -WorkstationsOnly
+## Example Output
 
-8. Specify an Active Directory Search Base
-
-.\Find-RDPaccess.ps1 -SearchBase "OU=Workstations,DC=INLANEFREIGHT,DC=LOCAL"
-
-Replace the example distinguished name with the OU or container you want to search.
-
-9. Combine Parameters
-
-Enumerate workstations and test connectivity:
-
-.\Find-RDPaccess.ps1 -WorkstationsOnly -TestConnection
-
-Target a specific computer and test connectivity:
-
-.\Find-RDPaccess.ps1 -ComputerName ACADEMY-EA-MS01 -TestConnection
-
-Example Output
-
+```text
 ============================================================
 Target Computer : ACADEMY-EA-MS01.INLANEFREIGHT.LOCAL
 Current User    : INLANEFREIGHT\htb-student
 ============================================================
+
 Matching Group Memberships:
+
   Local Group Name : Administrators
   MemberName       : INLANEFREIGHT\Domain Users
   Match Reason     : Matched a group SID in the current Windows token
   Interpretation   : Potential local administrator access
+
   Local Group Name : Remote Desktop Users
   MemberName       : INLANEFREIGHT\Domain Users
   Match Reason     : Matched a group SID in the current Windows token
   Interpretation   : Potential Remote Desktop (RDP) access
+
 LocalAdmin         : Yes
 RDP Group          : Yes
 RDP Connection     : Yes
 WinRM Group        : No
 WinRM Connection   : No
+```
 
-The output above is illustrative. Actual results depend on the target environment, group memberships, permissions, and network configuration.
+*Example output only. Actual results depend on the target environment.*
 
-Output Fields
+## Output Fields
 
-Field	Description
-Target Computer	Computer being enumerated
-Current User	Identity running the script
-Local Group Name	Local group containing the enumerated principal
-MemberName	User or group returned by PowerView
-Match Reason	Reason the principal matched the current user’s identity or token
-Interpretation	Potential access associated with the local group
-LocalAdmin	Whether a matching principal was found in Administrators
-RDP Group	Whether a matching principal was found in Remote Desktop Users
-RDP Connection	Whether TCP port 3389 is reachable, or Not tested
-WinRM Group	Whether a matching principal was found in Remote Management Users
-WinRM Connection	Whether the remote PowerShell command succeeded, or Not tested
+| Field | Description |
+|---|---|
+| `Target Computer` | Computer being enumerated |
+| `Current User` | Identity running the script |
+| `Local Group Name` | Name of the local group being checked |
+| `MemberName` | User or group returned by PowerView |
+| `Match Reason` | Reason the principal matched the current user or token |
+| `Interpretation` | Potential access associated with the group |
+| `LocalAdmin` | Whether a matching principal was found in `Administrators` |
+| `RDP Group` | Whether a matching principal was found in `Remote Desktop Users` |
+| `RDP Connection` | Whether TCP port 3389 is reachable |
+| `WinRM Group` | Whether a matching principal was found in `Remote Management Users` |
+| `WinRM Connection` | Whether the remote PowerShell command succeeded |
 
-Understanding the Results
+## Connection Test Details
 
-LocalAdmin
+### RDP
 
-Yes indicates that a matching principal was found in the target’s local Administrators group.
+The script checks TCP port 3389.
 
-RDP Group
+- `Yes`: The port is reachable.
+- `No`: The port check failed.
+- `Not tested`: `-TestConnection` was not specified.
 
-Yes indicates that a matching principal was found in the target’s local Remote Desktop Users group.
+**A reachable RDP port does not guarantee successful authentication or an interactive RDP session.**
 
-RDP Connection
+### WinRM
 
-* Yes: TCP port 3389 is reachable.
-* No: The port check did not succeed.
-* Not tested: The -TestConnection parameter was not specified.
+The script attempts to execute a remote PowerShell command.
 
-WinRM Group
+- `Yes`: The remote command succeeded.
+- `No`: The remote command failed.
+- `Not tested`: `-TestConnection` was not specified.
 
-Yes indicates that a matching principal was found in the target’s local Remote Management Users group.
+A failed test may indicate connectivity, authentication, authorization, or configuration problems.
 
-WinRM Connection
+## Limitations
 
-* Yes: The remote PowerShell command succeeded.
-* No: The remote command failed.
-* Not tested: The -TestConnection parameter was not specified.
+- Group membership does not guarantee effective access.
+- Nested Active Directory group membership is not fully resolved.
+- Enumeration failures can result in incomplete results.
+- Server and workstation filtering depends on the `OperatingSystem` attribute in Active Directory.
+- RDP testing checks port reachability only; it does not attempt authentication.
 
-Important Limitations
-
-* Group membership does not guarantee effective access. Actual access depends on permissions, policies, firewall rules, authentication, and other security controls.
-* RDP testing checks port reachability only. It does not verify credentials or confirm that an RDP session can be established.
-* WinRM testing attempts remote command execution. Failure may indicate connectivity, authentication, authorization, or configuration issues.
-* Nested group membership is not fully resolved. The script checks the current user’s SID, group SIDs in the current Windows token, and the domain’s Domain Users SID. Other indirect memberships may not be identified.
-* Enumeration errors can produce incomplete results. A group that cannot be enumerated may not appear in the output.
-* Operating-system filters depend on Active Directory attributes. Missing or inaccurate OperatingSystem values can affect server and workstation filtering.
-
-Disclaimer
+## Disclaimer
 
 This tool is intended for authorized security assessments, Active Directory administration, penetration-testing labs, and educational use.
 
-Only run it against systems you own or have explicit permission to assess.
-
-License
-
-Add an appropriate open-source license before distributing or reusing this project.
+Only use it against systems you own or have explicit permission to assess.
