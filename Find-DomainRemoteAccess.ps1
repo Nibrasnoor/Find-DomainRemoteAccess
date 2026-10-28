@@ -16,51 +16,65 @@ param(
 # ============================================================
 # Find-DomainRemoteAccess.ps1
 #
-# Enumerates local Administrators, Remote Desktop Users, and
-# Remote Management Users group memberships on AD computers.
+# Enumerates local group memberships on domain computers:
+#   - Administrators
+#   - Remote Desktop Users
+#   - Remote Management Users
 #
-# Requirements:
-#   - Windows PowerShell
-#   - ActiveDirectory module
-#   - PowerView loaded into the current session
+# Matches local group members against the assessment user's
+# SID and AD security-group SIDs.
+#
+# Optional connectivity tests:
+#   - RDP: TCP port 3389
+#   - WinRM: remote PowerShell command execution
+#
+# Requires:
+#   - ActiveDirectory PowerShell module
+#   - PowerView (Get-NetLocalGroupMember)
+#   - Appropriate permissions and authorized access
 # ============================================================
 
-# ------------------------------------------------------------
-# Validate parameters and prerequisites
-# ------------------------------------------------------------
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+# ============================================================
+# 1. Validate prerequisites
+# ============================================================
+
+if (-not (Get-Command Get-ADDomain -ErrorAction SilentlyContinue)) {
+    throw "ActiveDirectory PowerShell module is unavailable. Import it before running this script."
+}
+
+if (-not (Get-Command Get-NetLocalGroupMember -ErrorAction SilentlyContinue)) {
+    throw "Get-NetLocalGroupMember was not found. Import PowerView before running this script."
+}
 
 if ($ServersOnly -and $WorkstationsOnly) {
     throw "Use either -ServersOnly or -WorkstationsOnly, not both."
 }
 
-Import-Module ActiveDirectory -ErrorAction Stop
+# ============================================================
+# 2. Determine the assessment identity
+# ============================================================
 
-if (-not (Get-Command Get-NetLocalGroupMember -ErrorAction SilentlyContinue)) {
-    throw "Get-NetLocalGroupMember was not found. Load PowerView.ps1 before running this script."
+$ProcessIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$ProcessUser = $ProcessIdentity.Name
+
+if ($Credential) {
+    $AssessmentUser = $Credential.UserName
+    $SamAccountName = ($Credential.UserName -split '\\')[-1]
+}
+else {
+    $AssessmentUser = $ProcessUser
+    $SamAccountName = ($ProcessUser -split '\\')[-1]
 }
 
-# ------------------------------------------------------------
-# Determine the current Windows identity
-# ------------------------------------------------------------
-# Credential is used for remote operations and AD queries.
-# The current user's identity remains the identity of the
-# PowerShell process running this script.
-# ------------------------------------------------------------
+Write-Host ""
+Write-Host "[*] Assessment identity: $AssessmentUser" -ForegroundColor Cyan
 
-$CurrentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-
-$CurrentUser = $CurrentIdentity.Name
-$UserSID = $CurrentIdentity.User.Value
-
-$CurrentSIDs = @(
-    $CurrentIdentity.Groups | ForEach-Object {
-        $_.Value
-    }
-)
-
-# ------------------------------------------------------------
-# Build Active Directory query parameters
-# ------------------------------------------------------------
+# ============================================================
+# 3. Build AD parameters
+# ============================================================
 
 $ADParams = @{}
 
@@ -68,47 +82,127 @@ if ($Credential) {
     $ADParams['Credential'] = $Credential
 }
 
-# ------------------------------------------------------------
-# Retrieve domain SID and Domain Users SID
-# ------------------------------------------------------------
+if ($SearchBase) {
+    $ADParams['SearchBase'] = $SearchBase
+}
 
-$DomainUsersSID = $null
+# ============================================================
+# 4. Discover the domain
+# ============================================================
 
 try {
-    $DomainInfo = Get-ADDomain @ADParams -ErrorAction Stop
-
-    $DomainSID = $DomainInfo.DomainSID.Value
-    $DomainUsersSID = "$DomainSID-513"
+    $DomainInfo = Get-ADDomain @(
+        $ADParams
+    )
 }
 catch {
-    Write-Warning "Unable to retrieve domain SID: $($_.Exception.Message)"
+    # Retry using standard PowerShell splatting.
+    $DomainInfo = Get-ADDomain @ADParams
 }
 
-# ------------------------------------------------------------
-# Enumerate target computers
-# ------------------------------------------------------------
+$DomainSID = $DomainInfo.DomainSID.Value
+$DomainName = $DomainInfo.NetBIOSName
+$DomainDNSName = $DomainInfo.DNSRoot
+$DomainController = $DomainInfo.PDCEmulator
 
-$Computers = @()
+Write-Host "[*] Domain: $DomainDNSName" -ForegroundColor Cyan
 
-if ($ComputerName) {
+# ============================================================
+# 5. Resolve the assessment user and group SIDs
+# ============================================================
 
-    foreach ($Computer in $ComputerName) {
+try {
+    $UserParams = @{
+        Identity    = $SamAccountName
+        Server      = $DomainController
+        ErrorAction = 'Stop'
+    }
 
-        if ([string]::IsNullOrWhiteSpace($Computer)) {
-            continue
+    if ($Credential) {
+        $UserParams['Credential'] = $Credential
+    }
+
+    $AssessmentADUser = Get-ADUser @UserParams
+
+    $AssessmentUserSID = $AssessmentADUser.SID.Value
+
+    $GroupParams = @{
+        Identity    = $AssessmentADUser
+        Server      = $DomainController
+        ErrorAction = 'Stop'
+    }
+
+    if ($Credential) {
+        $GroupParams['Credential'] = $Credential
+    }
+
+    $AssessmentGroups = @(
+        Get-ADPrincipalGroupMembership @GroupParams
+    )
+
+    $AssessmentGroupSIDs = @(
+        $AssessmentGroups |
+            ForEach-Object { $_.SID.Value } |
+            Where-Object { $_ }
+    )
+
+    # Include the user's own SID and the SIDs of their AD groups.
+    $AssessmentSIDs = @(
+        $AssessmentUserSID
+        $AssessmentGroupSIDs
+    ) | Sort-Object -Unique
+
+    if (-not $AssessmentUserSID) {
+        throw "Could not resolve the assessment user's SID."
+    }
+
+    Write-Host "[+] Assessment account resolved: $($AssessmentADUser.SamAccountName)" -ForegroundColor Green
+    Write-Host "[+] Account SID: $AssessmentUserSID" -ForegroundColor Green
+    Write-Host "[+] AD group SIDs collected: $($AssessmentGroupSIDs.Count)" -ForegroundColor Green
+}
+catch {
+    throw "Could not resolve the assessment user's SID or AD group memberships. $($_.Exception.Message)"
+}
+
+# ============================================================
+# 6. Discover target computers
+# ============================================================
+
+if ($ComputerName -and $ComputerName.Count -gt 0) {
+
+    $Computers = foreach ($Name in $ComputerName) {
+        try {
+            $ComputerParams = @{
+                Identity    = $Name
+                Server      = $DomainController
+                Properties  = @(
+                    'DNSHostName',
+                    'OperatingSystem',
+                    'DistinguishedName'
+                )
+                ErrorAction = 'Stop'
+            }
+
+            if ($Credential) {
+                $ComputerParams['Credential'] = $Credential
+            }
+
+            Get-ADComputer @ComputerParams
         }
-
-        $Computers += [PSCustomObject]@{
-            Name            = $Computer
-            OperatingSystem = $null
+        catch {
+            Write-Warning "Could not resolve computer '$Name' in AD: $($_.Exception.Message)"
         }
     }
 }
 else {
-
     $ComputerParams = @{
-        Filter     = '*'
-        Properties = @('OperatingSystem')
+        Filter      = '*'
+        Server      = $DomainController
+        Properties  = @(
+            'DNSHostName',
+            'OperatingSystem',
+            'DistinguishedName'
+        )
         ErrorAction = 'Stop'
     }
 
@@ -116,177 +210,192 @@ else {
         $ComputerParams['SearchBase'] = $SearchBase
     }
 
-    foreach ($Key in $ADParams.Keys) {
-        $ComputerParams[$Key] = $ADParams[$Key]
+    if ($Credential) {
+        $ComputerParams['Credential'] = $Credential
     }
 
-    try {
-        $Computers = @(Get-ADComputer @ComputerParams)
-    }
-    catch {
-        Write-Error "Failed to enumerate AD computers: $($_.Exception.Message)"
-        return
-    }
-
-    if ($ServersOnly) {
-        $Computers = @(
-            $Computers | Where-Object {
-                $_.OperatingSystem -match 'Server'
-            }
-        )
-    }
-
-    if ($WorkstationsOnly) {
-        $Computers = @(
-            $Computers | Where-Object {
-                $_.OperatingSystem -and
-                $_.OperatingSystem -notmatch 'Server'
-            }
-        )
-    }
+    $Computers = @(Get-ADComputer @ComputerParams)
 }
 
-if (-not $Computers -or $Computers.Count -eq 0) {
-    Write-Warning "No computers found."
+if ($ServersOnly) {
+    $Computers = @(
+        $Computers | Where-Object {
+            $_.OperatingSystem -like '*Server*'
+        }
+    )
+}
+elseif ($WorkstationsOnly) {
+    $Computers = @(
+        $Computers | Where-Object {
+            $_.OperatingSystem -and
+            $_.OperatingSystem -notlike '*Server*'
+        }
+    )
+}
+
+if (-not $Computers -or @($Computers).Count -eq 0) {
+    Write-Warning "No target computers were found."
     return
 }
 
-# ------------------------------------------------------------
-# Define local groups to enumerate
-# ------------------------------------------------------------
+# ============================================================
+# 7. Define the local groups to enumerate
+# ============================================================
 
-$GroupsToCheck = @(
-    @{
-        GroupName   = 'Administrators'
-        Description = 'Potential local administrator access'
-    },
-    @{
-        GroupName   = 'Remote Desktop Users'
-        Description = 'Potential Remote Desktop (RDP) access'
-    },
-    @{
-        GroupName   = 'Remote Management Users'
-        Description = 'Potential Windows Remote Management (WinRM) access'
-    }
+$LocalGroups = @(
+    'Administrators'
+    'Remote Desktop Users'
+    'Remote Management Users'
 )
 
-# ------------------------------------------------------------
-# Enumerate each target
-# ------------------------------------------------------------
-
-$AllResults = @()
+# ============================================================
+# 8. Process each computer
+# ============================================================
 
 foreach ($Computer in $Computers) {
 
-    $Target = $Computer.Name
+    $Target = if ($Computer.DNSHostName) {
+        $Computer.DNSHostName
+    }
+    else {
+        $Computer.Name
+    }
 
-    Write-Host "`n[*] Checking $Target" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "[*] Checking $Target" -ForegroundColor Cyan
 
-    $ComputerResults = @()
+    $MatchingMemberships = @()
 
-    foreach ($Check in $GroupsToCheck) {
+    # --------------------------------------------------------
+    # Enumerate each local group
+    # --------------------------------------------------------
+
+    foreach ($Group in $LocalGroups) {
 
         try {
-
-            $GroupParams = @{
+            $LocalGroupParams = @{
                 ComputerName = $Target
-                GroupName    = $Check.GroupName
+                GroupName    = $Group
                 ErrorAction  = 'Stop'
             }
 
             if ($Credential) {
-                $GroupParams['Credential'] = $Credential
+                $LocalGroupParams['Credential'] = $Credential
             }
 
-            $Members = @(Get-NetLocalGroupMember @GroupParams)
-
-            foreach ($Member in $Members) {
-
-                # Extract the member SID.
-                $MemberSID = $null
-
-                if (
-                    $Member.SID -is
-                    [System.Security.Principal.SecurityIdentifier]
-                ) {
-                    $MemberSID = $Member.SID.Value
-                }
-                elseif ($Member.SID) {
-                    $MemberSID = [string]$Member.SID
-                }
-
-                if (-not $MemberSID) {
-                    continue
-                }
-
-                $MatchReason = $null
-
-                if ($MemberSID -eq $UserSID) {
-
-                    $MatchReason = 'Direct user SID match'
-                }
-                elseif ($CurrentSIDs -contains $MemberSID) {
-
-                    $MatchReason = 'Matched a group SID in the current Windows token'
-                }
-                elseif (
-                    $DomainUsersSID -and
-                    $MemberSID -eq $DomainUsersSID
-                ) {
-
-                    $MatchReason = 'Domain Users group SID'
-                }
-
-                if ($MatchReason) {
-
-                    $ComputerResults += [PSCustomObject]@{
-                        ComputerName   = $Target
-                        LocalGroupName = $Check.GroupName
-                        MemberName     = $Member.MemberName
-                        SID            = $MemberSID
-                        MatchReason    = $MatchReason
-                        Interpretation = $Check.Description
-                    }
-                }
-            }
+            # OPTION 3:
+            # Suppress only the warning stream from this invocation.
+            # Normal results and errors remain available.
+            $Members = @(
+                Get-NetLocalGroupMember @LocalGroupParams 3>$null
+            )
         }
         catch {
+            Write-Verbose "Could not enumerate '$Group' on '$Target': $($_.Exception.Message)"
+            continue
+        }
 
-            Write-Warning (
-                "Could not enumerate '$($Check.GroupName)' on " +
-                "$Target : $($_.Exception.Message)"
-            )
+        foreach ($Member in $Members) {
+
+            $MemberSID = [string]$Member.SID
+
+            if (-not $MemberSID) {
+                continue
+            }
+
+            $MatchReason = $null
+            $Interpretation = $null
+
+            # Direct match against the assessment user's SID.
+            if ($MemberSID -eq $AssessmentUserSID) {
+
+                $MatchReason = 'Direct assessment user SID match'
+
+            }
+            # Match against any AD group SID belonging to the
+            # assessment user.
+            elseif ($AssessmentGroupSIDs -contains $MemberSID) {
+
+                $MatchReason = 'Matched an AD group SID of the assessment user'
+
+            }
+
+            if (-not $MatchReason) {
+                continue
+            }
+
+            switch ($Group) {
+
+                'Administrators' {
+                    $Interpretation = 'Potential local administrator access'
+                }
+
+                'Remote Desktop Users' {
+                    $Interpretation = 'Potential Remote Desktop (RDP) access'
+                }
+
+                'Remote Management Users' {
+                    $Interpretation = 'Potential Windows Remote Management (WinRM) access'
+                }
+            }
+
+            $MatchingMemberships += [PSCustomObject]@{
+                ComputerName   = $Target
+                LocalGroupName = $Group
+                MemberName     = $Member.MemberName
+                MemberSID      = $MemberSID
+                MatchReason    = $MatchReason
+                Interpretation = $Interpretation
+            }
         }
     }
 
-    # Only report computers with matching group memberships.
-    if ($ComputerResults.Count -eq 0) {
+    # --------------------------------------------------------
+    # Skip computers with no matching memberships
+    # --------------------------------------------------------
 
-        Write-Host "[-] No matching memberships found on $Target" `
-            -ForegroundColor DarkGray
-
+    if ($MatchingMemberships.Count -eq 0) {
+        Write-Host "[-] No matching memberships found on $Target" -ForegroundColor DarkYellow
         continue
     }
 
     # --------------------------------------------------------
-    # Optional RDP and WinRM connectivity tests
+    # Summarize group matches
     # --------------------------------------------------------
 
-    $RDPConnection = 'Not tested'
-    $WinRMConnection = 'Not tested'
+    $HasLocalAdmin = [bool](
+        $MatchingMemberships |
+            Where-Object { $_.LocalGroupName -eq 'Administrators' }
+    )
+
+    $HasRDPGroup = [bool](
+        $MatchingMemberships |
+            Where-Object { $_.LocalGroupName -eq 'Remote Desktop Users' }
+    )
+
+    $HasWinRMGroup = [bool](
+        $MatchingMemberships |
+            Where-Object { $_.LocalGroupName -eq 'Remote Management Users' }
+    )
+
+    # --------------------------------------------------------
+    # Optional connectivity tests
+    # --------------------------------------------------------
+
+    $RDPConnection = 'Not Tested'
+    $WinRMConnection = 'Not Tested'
 
     if ($TestConnection) {
 
-        # RDP: Check TCP port 3389.
+        # RDP: TCP connectivity only; does not verify login access.
         try {
-
-            $RDPTest = Test-NetConnection `
+            $RDPResult = Test-NetConnection `
                 -ComputerName $Target `
                 -Port 3389 `
                 -WarningAction SilentlyContinue `
                 -ErrorAction Stop
 
-            if ($RDPTest.TcpTestSucceeded) {
+            if ($RDPResult.TcpTestSucceeded) {
                 $RDPConnection = 'Yes'
             }
             else {
@@ -294,90 +403,65 @@ foreach ($Computer in $Computers) {
             }
         }
         catch {
-            $RDPConnection = 'No'
+            $RDPConnection = 'Error'
         }
 
-        # WinRM: Attempt to execute a remote PowerShell command.
+        # WinRM: attempts an authenticated remote command.
         try {
-
-            $InvokeParams = @{
+            $RemoteCommandParams = @{
                 ComputerName = $Target
                 ScriptBlock  = { $env:COMPUTERNAME }
                 ErrorAction  = 'Stop'
             }
 
             if ($Credential) {
-                $InvokeParams['Credential'] = $Credential
+                $RemoteCommandParams['Credential'] = $Credential
             }
 
-            $null = Invoke-Command @InvokeParams
-
+            $null = Invoke-Command @RemoteCommandParams
             $WinRMConnection = 'Yes'
         }
         catch {
             $WinRMConnection = 'No'
+            Write-Verbose "WinRM test failed on '$Target': $($_.Exception.Message)"
         }
     }
 
     # --------------------------------------------------------
-    # Calculate status fields
+    # Display results in README-style format
     # --------------------------------------------------------
 
-    $HasAdminAccess = (
-        $ComputerResults.LocalGroupName -contains 'Administrators'
-    )
+    Write-Host ""
+    Write-Host "============================================================"
+    Write-Host "Target Computer : $Target"
+    Write-Host "Current User    : $AssessmentUser"
+    Write-Host "============================================================"
 
-    $HasRDPGroup = (
-        $ComputerResults.LocalGroupName -contains 'Remote Desktop Users'
-    )
+    Write-Host ""
+    Write-Host "Matching Group Memberships:"
+    Write-Host ""
 
-    $HasWinRMGroup = (
-        $ComputerResults.LocalGroupName -contains 'Remote Management Users'
-    )
+    foreach ($Match in $MatchingMemberships) {
 
-    # --------------------------------------------------------
-    # Display results in README format
-    # --------------------------------------------------------
+        Write-Host "  Local Group Name : $($Match.LocalGroupName)"
+        Write-Host "  MemberName       : $($Match.MemberName)"
+        Write-Host "  Match Reason     : $($Match.MatchReason)"
+        Write-Host "  Interpretation   : $($Match.Interpretation)"
+        Write-Host ""
+    }
 
-    Write-Host "`n============================================================" `
-        -ForegroundColor Cyan
+    Write-Host "LocalAdmin         : $(if ($HasLocalAdmin) { 'Yes' } else { 'No' })"
+    Write-Host "RDP Group          : $(if ($HasRDPGroup) { 'Yes' } else { 'No' })"
 
-    Write-Host "Target Computer : $Target" -ForegroundColor Cyan
-    Write-Host "Current User    : $CurrentUser" -ForegroundColor Cyan
+    if ($TestConnection) {
+        Write-Host "RDP Connection     : $RDPConnection"
+    }
 
-    Write-Host "============================================================" `
-        -ForegroundColor Cyan
+    Write-Host "WinRM Group        : $(if ($HasWinRMGroup) { 'Yes' } else { 'No' })"
 
-    Write-Host "`nMatching Group Memberships:" -ForegroundColor Yellow
-
-    foreach (
-        $Result in (
-            $ComputerResults |
-            Sort-Object LocalGroupName, MemberName -Unique
-        )
-    ) {
-
-        Write-Host "`n  Local Group Name : $($Result.LocalGroupName)"
-        Write-Host "  MemberName       : $($Result.MemberName)"
-        Write-Host "  Match Reason     : $($Result.MatchReason)"
-        Write-Host "  Interpretation   : $($Result.Interpretation)"
+    if ($TestConnection) {
+        Write-Host "WinRM Connection   : $WinRMConnection"
     }
 
     Write-Host ""
-
-    Write-Host ("LocalAdmin         : " + $(if ($HasAdminAccess) { 'Yes' } else { 'No' }))
-    Write-Host ("RDP Group          : " + $(if ($HasRDPGroup) { 'Yes' } else { 'No' }))
-    Write-Host "RDP Connection     : $RDPConnection"
-    Write-Host ("WinRM Group        : " + $(if ($HasWinRMGroup) { 'Yes' } else { 'No' }))
-    Write-Host "WinRM Connection   : $WinRMConnection"
-
-    # Store matching results for optional downstream processing.
-    $AllResults += $ComputerResults
 }
-
-# ------------------------------------------------------------
-# Return structured results to the PowerShell pipeline
-# ------------------------------------------------------------
-
-$AllResults |
-    Sort-Object ComputerName, LocalGroupName, MemberName -Unique
